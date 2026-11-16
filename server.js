@@ -1,44 +1,18 @@
-'use strict';
 
-/**
- * =========================================================
- *  Eagler WSS Reverse Proxy + Static Site (Template)
- * =========================================================
- *  - Serves files from /public
- *  - Proxies WebSocket upgrades to UPSTREAM_WSS
- *  - Works even when WS path is "/" (no /wss needed)
- *
- *  Setup:
- *   1) Put your website files in /public
- *   2) Set UPSTREAM_WSS below to your eagler host URL
- *   3) (Optional) Set WS_SECRET_PATH to lock access
- * =========================================================
- */
+'use strict';
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 
-/* =======================
-   CONFIG (EDIT THESE)
-   ======================= */
 const PORT = process.env.PORT || 10000;
 
-// Your EaglerHost server WSS URL:
-const UPSTREAM_WSS = process.env.UPSTREAM_WSS || 'us-lax01.altare.global:25118';
+const UPSTREAM_WSS = process.env.UPSTREAM_WSS || 'ws://us-lax01.altare.global:25118';
 
-// Static site folder:
 const PUBLIC_DIR = path.join(__dirname, 'public');
+const WS_SECRET_PATH = process.env.WS_SECRET_PATH || '';
 
-// OPTIONAL: lock the WS proxy behind a secret path.
-// Example: "/secret123" -> client connects to wss://yourdomain.com/secret123
-// Set to "" to allow any path.
-const WS_SECRET_PATH = process.env.WS_SECRET_PATH || ''; // e.g. "/secret123" or ""
-
-/* =======================
-   INTERNALS
-   ======================= */
 function log(...a) {
   console.log(new Date().toISOString(), ...a);
 }
@@ -84,7 +58,6 @@ function serveStatic(req, res) {
 
   const filePath = path.join(PUBLIC_DIR, safePath);
 
-  // Prevent directory escape
   if (!filePath.startsWith(PUBLIC_DIR)) {
     res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
     res.end('Forbidden');
@@ -114,7 +87,6 @@ function serveStatic(req, res) {
 
 const server = http.createServer(serveStatic);
 
-// noServer WS server so "/" can stay HTTP too
 const wss = new WebSocket.Server({
   noServer: true,
   perMessageDeflate: false,
@@ -127,7 +99,6 @@ server.on('upgrade', (req, socket, head) => {
 
   const pathOnly = (req.url || '').split('?')[0];
 
-  // If locked, require exact secret path
   if (WS_SECRET_PATH && pathOnly !== WS_SECRET_PATH) {
     socket.destroy();
     return;
@@ -151,7 +122,6 @@ wss.on('connection', (client, req) => {
 
   log('[IN ] ws connect', { ip, path: pathOnly, protocols });
 
-  // Queue early packets until upstream opens (helps server list MOTD/ping)
   const MAX_QUEUE_BYTES = 2 * 1024 * 1024;
   const queue = [];
   let queueBytes = 0;
@@ -159,6 +129,10 @@ wss.on('connection', (client, req) => {
   const upstream = new WebSocket(UPSTREAM_WSS, protocols, {
     perMessageDeflate: false,
     handshakeTimeout: 15000,
+    headers: {
+      'X-Real-IP': ip,
+      'X-Eagler-Secret': process.env.EAGLER_FORWARD_SECRET || ''
+    }
   });
 
   const kill = (why) => {
@@ -174,7 +148,6 @@ wss.on('connection', (client, req) => {
     if (queueBytes > MAX_QUEUE_BYTES) kill('queue overflow');
   }
 
-  // Client -> Upstream
   client.on('message', (data, isBinary) => {
     if (upstream.readyState === WebSocket.OPEN) {
       upstream.send(data, { binary: isBinary, compress: false });
@@ -195,7 +168,6 @@ wss.on('connection', (client, req) => {
     }
   });
 
-  // Upstream -> Client
   upstream.on('message', (data, isBinary) => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(data, { binary: isBinary, compress: false });
